@@ -1,0 +1,3 @@
+# CloudStation Pack Directory
+# This directory contains the embedded CloudStation Nomad pack files.
+# Add pack files here to be embedded into the binary at compile time.

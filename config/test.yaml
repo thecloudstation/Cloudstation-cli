@@ -1,0 +1,11 @@
+# Test configuration for ACR token system
+api_url: "http://localhost:8085"
+auth:
+  api_key: "test-api-key-123"
+  client_id: "test-client-123"
+  user_uuid: "test-user-uuid"
+
+registry:
+  url: "acrbc001.azurecr.io"
+  namespace_prefix: "cli"
+  use_app_tokens: true

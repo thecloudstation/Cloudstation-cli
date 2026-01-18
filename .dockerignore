@@ -1,0 +1,49 @@
+# Git files
+.git/
+.github/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+docs/
+specs/
+examples/
+
+# Build artifacts
+bin/
+dist/
+build/
+coverage.*
+*.html
+*.test
+*.out
+
+# Logs
+logs/
+*.log
+
+# Test files
+test-docker/
+test-backend*.sh
+test-dispatch*.sh
+test-local*.sh
+test-real*.sh
+test-registry*.sh
+*_test.go
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# OS files
+.DS_Store
+Thumbs.db

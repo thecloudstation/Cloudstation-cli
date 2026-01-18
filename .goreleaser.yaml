@@ -1,0 +1,138 @@
+# GoReleaser configuration for CloudStation CLI
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+project_name: cs
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cs
+    binary: cs
+    main: ./cmd/cloudstation
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.DefaultAPIURL={{ if index .Env "CS_API_URL" }}{{ .Env.CS_API_URL }}{{ else }}https://api.cloud-station.io{{ end }}
+      - -X main.DefaultAuthURL={{ if index .Env "CS_AUTH_URL" }}{{ .Env.CS_AUTH_URL }}{{ else }}https://auth.cloud-station.io{{ end }}
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    builds:
+      - cs
+    name_template: >-
+      {{ .ProjectName }}-
+      {{- .Os }}-
+      {{- if eq .Arch "amd64" }}amd64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - .env.example
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+release:
+  github:
+    owner: thecloudstation
+    name: cloudstation-orchestrator
+  name_template: "CloudStation CLI {{.Version}}"
+  header: |
+    ## 🚀 CloudStation CLI {{.Version}}
+
+    **Deploy and manage applications on CloudStation**
+
+    ### 📦 Downloads
+
+    Choose the binary for your platform below, or use the quick install commands.
+
+  footer: |
+    ## 🛠️ Quick Install
+
+    ### Linux/macOS
+    ```bash
+    # Linux AMD64
+    curl -L -o cs.tar.gz "https://github.com/thecloudstation/cloudstation-orchestrator/releases/download/{{.Tag}}/cs-linux-amd64.tar.gz"
+    tar -xzf cs.tar.gz && chmod +x cs && sudo mv cs /usr/local/bin/
+
+    # Linux ARM64
+    curl -L -o cs.tar.gz "https://github.com/thecloudstation/cloudstation-orchestrator/releases/download/{{.Tag}}/cs-linux-arm64.tar.gz"
+    tar -xzf cs.tar.gz && chmod +x cs && sudo mv cs /usr/local/bin/
+
+    # macOS Intel
+    curl -L -o cs.tar.gz "https://github.com/thecloudstation/cloudstation-orchestrator/releases/download/{{.Tag}}/cs-darwin-amd64.tar.gz"
+    tar -xzf cs.tar.gz && chmod +x cs && sudo mv cs /usr/local/bin/
+
+    # macOS Apple Silicon
+    curl -L -o cs.tar.gz "https://github.com/thecloudstation/cloudstation-orchestrator/releases/download/{{.Tag}}/cs-darwin-arm64.tar.gz"
+    tar -xzf cs.tar.gz && chmod +x cs && sudo mv cs /usr/local/bin/
+    ```
+
+    ### Windows
+    Download `cs-windows-amd64.zip`, extract, and add to your PATH.
+
+    ### Verify Installation
+    ```bash
+    cs --version
+    cs whoami
+    ```
+
+    ## 📋 Quick Start
+    ```bash
+    # Login
+    cs login
+
+    # Create a project
+    cs project create my-app
+
+    # Deploy from template
+    cs template deploy redis --project <project-id>
+
+    # List services
+    cs service list <project-id>
+    ```
+
+    ---
+    Built with commit: {{.Commit}}
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: 0
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: 'Bug fixes'
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge branch

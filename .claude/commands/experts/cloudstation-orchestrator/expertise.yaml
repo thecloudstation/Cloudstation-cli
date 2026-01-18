@@ -1,0 +1,349 @@
+# CloudStation Orchestrator Expertise
+# A minimal Go-based deployment orchestrator replacing the legacy Waypoint fork
+# Last validated: 2026-01-01
+
+overview:
+  description: |
+    CloudStation Orchestrator is a lightweight (~5K lines) deployment orchestrator built in Go.
+    It provides a Build -> Registry -> Deploy -> Release pipeline with builtin plugins,
+    NATS event streaming, WebSocket log streaming, and backend API integration.
+  binary_name: cs
+  config_file: cloudstation.hcl
+  architecture: CLI with dispatch mode for Nomad-dispatched jobs
+  key_components:
+    - CLI commands (init, build, deploy, up, dispatch, login)
+    - Lifecycle executor (orchestrates build/registry/deploy/release phases)
+    - Plugin system (builder, registry, platform, release manager)
+    - NATS client (deployment event publishing)
+    - WebSocket client (log streaming to frontend)
+    - Backend API client (deployment tracking, domain allocation)
+    - HCL generator (dynamic config and vars.hcl generation)
+
+core_implementation:
+  entry_point:
+    file: cmd/cloudstation/main.go
+    description: CLI entry point using urfave/cli/v2, registers all builtin plugins via init()
+    key_commands:
+      - init: Create default cloudstation.hcl
+      - build: Execute build phase only
+      - deploy: Placeholder (use 'up' for full lifecycle)
+      - up: Full lifecycle execution (build/registry/deploy/release)
+      - dispatch: Internal command for Nomad dispatched jobs (hidden)
+      - login/logout/whoami: Authentication commands
+      - runner agent: Placeholder for distributed execution
+
+  dispatch_mode:
+    file: cmd/cloudstation/dispatch.go
+    description: Handles Nomad-dispatched jobs with NATS events and WebSocket streaming
+    task_types:
+      deploy_repository:
+        description: Clone repo, build, push to registry, deploy to Nomad
+        params_struct: internal/dispatch/types.go:DeployRepositoryParams
+        handler: internal/dispatch/handlers.go:HandleDeployRepository
+      deploy_image:
+        description: Deploy pre-built Docker image to Nomad
+        params_struct: internal/dispatch/types.go:DeployImageParams
+        handler: internal/dispatch/handlers.go:HandleDeployImage
+      destroy_job:
+        description: Destroy Nomad jobs
+        params_struct: internal/dispatch/types.go:DestroyJobParams
+        handler: internal/dispatch/handlers.go:HandleDestroyJob
+    timeout: 15 minutes
+    environment_variables:
+      - WS_URL: WebSocket server URL for log streaming
+      - NATS_SERVERS: NATS server addresses
+      - NATS_CLIENT_PRIVATE_KEY: NKey seed for authentication
+      - NATS_STREAM_PREFIX: Namespace isolation prefix (e.g., "cs")
+      - BACKEND_URL: CloudStation backend API URL
+      - ACCESS_TOKEN: API authentication token
+
+  lifecycle_executor:
+    file: internal/lifecycle/executor.go
+    description: Orchestrates build/registry/deploy/release phases
+    methods:
+      Execute: Full lifecycle for an app
+      ExecuteBuild: Build phase only, returns artifact with detected ports
+      ExecuteRegistry: Push artifact to container registry
+      ExecuteDeploy: Deploy artifact to platform (Nomad)
+      ExecuteRelease: Optional release phase (traffic shifting)
+      BuildOnly: Public method for build command
+      DeployOnly: Deploy with existing artifact
+    secret_injection:
+      file: internal/lifecycle/secrets.go
+      description: Vault secrets injected into plugin config before build
+
+plugin_system:
+  registry:
+    file: internal/plugin/registry.go
+    description: Global plugin registry with thread-safe access
+    components: Builder, Registry, Platform, ReleaseManager
+    registration: Plugins self-register via init() using plugin.Register()
+
+  loader:
+    file: internal/plugin/loader.go
+    description: Loads and configures plugins from HCL config
+    methods:
+      LoadBuilder: Load builder with config
+      LoadRegistry: Load registry with config
+      LoadPlatform: Load platform with config
+      LoadReleaseManager: Load release manager with config
+
+  interfaces:
+    file: pkg/component/interfaces.go
+    description: Component interfaces all plugins implement
+    interfaces:
+      Builder: "Build(ctx) -> Artifact, ConfigSet/Config"
+      Registry: "Push(ctx, artifact) -> RegistryRef, Pull, ConfigSet/Config"
+      Platform: "Deploy(ctx, artifact) -> Deployment, Destroy, Status, ConfigSet/Config"
+      ReleaseManager: "Release(ctx, deployment) -> error, ConfigSet/Config"
+      Configurable: Common interface for all components
+
+builtin_plugins:
+  builders:
+    railpack:
+      file: builtin/railpack/plugin.go
+      description: Railway's next-gen zero-config builder using BuildKit
+      config_fields: Name, Tag, Context, BuildArgs, Env
+      features:
+        - Port detection from built image via portdetector
+        - WebSocket log streaming during build
+        - Vault secrets injection via env map
+    csdocker:
+      file: builtin/csdocker/plugin.go
+      description: Docker builds with Vault integration
+      config_fields: Name, Tag, Dockerfile, Context, BuildArgs
+    nixpacks:
+      file: builtin/nixpacks/plugin.go
+      description: Nixpacks builds with Vault secrets
+    noop:
+      file: builtin/noop/builder.go
+      description: No-op builder for testing/pre-built images
+
+  platforms:
+    nomadpack:
+      file: builtin/nomadpack/plugin.go
+      description: Nomad Pack deployments to Nomad clusters
+      config_fields: DeploymentName, Pack, NomadAddr, NomadToken, RegistryName, RegistrySource, RegistryRef, RegistryTarget, UseEmbedded
+      methods:
+        Deploy: Run nomad-pack with variables, returns Deployment
+        Destroy: "nomad job stop -purge {job_name}"
+        Status: "nomad job status {job_name}"
+      embedded_packs:
+        file: builtin/nomadpack/embedded.go
+        description: Built-in cloudstation pack for offline deployment
+
+  registries:
+    docker:
+      file: builtin/docker/plugin.go
+      description: Docker registry push with Azure Container Registry support
+
+streaming:
+  nats:
+    client:
+      file: pkg/nats/client.go
+      description: NATS JetStream client for deployment events
+      authentication: NKey-based (nkeys.FromSeed)
+      prefix_support: Namespace isolation via NATS_STREAM_PREFIX
+    events:
+      deployment_status_changed:
+        subject: "{prefix}.deployment.status.changed"
+        payload: "{ jobId, status }"
+        statuses: IN_PROGRESS, SUCCEEDED, FAILED
+      deployment_succeeded:
+        subject: "{prefix}.deployment.succeeded"
+        payload: "{ jobId, type, deploymentId, serviceId, teamId, userId, ownerId }"
+      deployment_failed:
+        subject: "{prefix}.deployment.failed"
+        payload: "{ jobId, type, deploymentId, serviceId, teamId, userId, ownerId }"
+      job_destroyed:
+        subject: "{prefix}.job.destroyed"
+        payload: "{ id, reason }"
+        reasons: delete, upgrade_volume, migrate_volume, suspend_account, pause_service
+    types_file: pkg/nats/types.go
+
+  websocket:
+    client:
+      file: pkg/websocket/client.go
+      description: Socket.IO client for real-time build log streaming
+      endpoint: "/build-logs"
+      event: "build-log"
+      format: "{deploymentID}\n{output}\n{counter}\n{content}"
+    buffering: 500ms flush interval with immediate Flush() method
+    writer:
+      file: pkg/websocket/writer.go
+      description: StreamWriter for direct log streaming from builders
+    logger:
+      file: pkg/websocket/logger.go
+      description: WebSocketLogger bridges WebSocket and io.Writer
+
+backend_api:
+  client:
+    file: pkg/backend/client.go
+    description: HTTP client for CloudStation backend API integration
+    retry: 3 attempts with exponential backoff (1-5s)
+    timeout: 30 seconds
+
+  endpoints:
+    ask_domain:
+      method: GET
+      path: "/api/local/ask-domain?serviceId={id}&accessToken={token}"
+      description: Allocate subdomain for detected ports
+      response: "{ domain: string }"
+
+    service_update:
+      method: PUT
+      path: "/api/local/service-update/?accessToken={token}"
+      description: Sync service config (network, docker_user, entrypoint, cmd)
+      request: UpdateServiceRequest
+
+    deployment_step_update:
+      method: PUT
+      path: "/api/local/deployment-step/update?accessToken={token}"
+      description: Track deployment progress for UI visibility
+      steps: clone, build, registry, deploy, release
+      statuses: in_progress, completed, failed
+
+  types_file: pkg/backend/types.go
+
+hcl_generation:
+  generator:
+    file: internal/hclgen/generator.go
+    description: Dynamic HCL config and vars.hcl generation
+    functions:
+      GenerateConfig: Generate cloudstation.hcl from DeploymentParams
+      GenerateVarsFile: Generate vars.hcl with Nomad Pack variables
+      WriteConfigFile: Write cloudstation.hcl to directory
+      WriteVarsFile: Write vars.hcl to directory
+    builder_normalization:
+      docker: mapped to csdocker
+      empty: defaults to nixpacks
+    deploy_normalization: defaults to nomad-pack
+
+  vars_file_fields:
+    - job_name, count, secret_path
+    - restart_attempts, restart_mode
+    - resources (cpu, memory, gpu), gpu_type, node_pool
+    - user_id, alloc_id, project_id, service_id
+    - shared_secret_path, uses_kv_engine, owner_uses_kv_engine
+    - regions, private_registry, private_registry_provider
+    - user, command, image
+    - use_csi_volume, volume_name, volume_mount_destination
+    - config_files, consul_service_name, consul_linked_services
+    - entrypoint, template, network
+    - use_tls, tls, vault_linked_secrets
+    - update, job_config, args
+
+  port_detection:
+    file: internal/hclgen/port_defaults.go
+    description: 3-tier fallback logic for port detection
+    tiers:
+      1: User-specified networks (highest priority)
+      2: Detected ports from artifact.ExposedPorts
+      3: Framework defaults (railpack=3000, nixpacks=3000, etc.)
+
+  types_file: internal/hclgen/types.go
+
+configuration:
+  parser:
+    file: internal/config/parser.go
+    description: HCL config file parsing using hashicorp/hcl/v2
+  types:
+    file: internal/config/types.go
+    description: Config structs with HCL tags
+    structs:
+      Config: Root config (Project, Runner, Apps, Variables)
+      AppConfig: App config (Name, Build, Registry, Deploy, Release)
+      PluginConfig: Plugin block (Use, Config map)
+
+authentication:
+  client:
+    file: pkg/auth/client.go
+    description: OAuth authentication with CloudStation backend
+  storage:
+    file: pkg/auth/storage.go
+    description: Credential storage in ~/.cloudstation/credentials.json
+  credentials:
+    file: pkg/auth/credentials.go
+    description: Credential validation and refresh
+  types:
+    file: pkg/auth/types.go
+    stored_credentials: Vault, Nomad, NATS connection info
+
+secrets:
+  vault_provider:
+    file: pkg/secrets/vault/provider.go
+    description: Vault secret provider using AppRole auth
+    methods: Fetch secrets from Vault path, inject into config
+  registry:
+    file: pkg/secrets/registry.go
+    description: Secret provider registry (Vault, etc.)
+
+git_operations:
+  clone:
+    file: pkg/git/clone.go
+    description: Git repository cloning with token auth
+    providers: GitHub, GitLab, Bitbucket
+    output_streaming: WebSocket log streaming during clone
+
+port_detection:
+  detector:
+    file: pkg/portdetector/detector.go
+    description: Detect exposed ports from Docker images
+    method: "docker image inspect {image}"
+
+deployment_types:
+  artifact:
+    file: pkg/artifact/types.go
+    description: Build artifact with image, tag, exposed ports, metadata
+  deployment:
+    file: pkg/deployment/types.go
+    description: Deployment record with ID, status, platform, metadata
+    states: pending, running, stopped, unknown
+    health: healthy, unhealthy, unknown
+
+testing:
+  unit_tests:
+    - builtin/railpack/builder_test.go
+    - builtin/nomadpack/plugin_test.go
+    - internal/dispatch/handlers_test.go
+    - pkg/nats/client_test.go
+    - pkg/websocket/client_test.go
+    - pkg/backend/client_test.go
+  integration_tests:
+    - pkg/backend/integration_test.go
+  run_command: "go test ./..."
+
+docker:
+  dockerfile: Dockerfile
+  makefile_targets:
+    - docker-build: Build Docker image
+    - docker-test: Verify binaries in container
+    - docker-push: Push to ACR
+  image_size: ~250-300MB (vs 600MB cs-runner)
+  included_binaries:
+    - cs (cloudstation orchestrator)
+    - nixpacks, railpack
+    - nomad-pack, nomad
+    - docker, git, az
+
+environment_variables:
+  config:
+    CS_CONFIG: "Path to config file (default: cloudstation.hcl)"
+    CS_LOG_LEVEL: "Log level (trace, debug, info, warn, error)"
+  vault:
+    VAULT_ADDR: "Vault server address"
+    VAULT_TOKEN: "Vault authentication token"
+  nomad:
+    NOMAD_ADDR: "Nomad server address"
+    NOMAD_TOKEN: "Nomad ACL token"
+  nats:
+    NATS_SERVERS: "NATS server URLs"
+    NATS_CLIENT_PRIVATE_KEY: "NKey seed"
+    NATS_STREAM_PREFIX: "Stream prefix for namespace isolation"
+  backend:
+    BACKEND_URL: "CloudStation backend API URL"
+    ACCESS_TOKEN: "API authentication token"
+  registry:
+    AZURE_CLIENT_ID: "Azure service principal"
+    AZURE_CLIENT_SECRET: "Azure secret"
+    AZURE_TENANT_ID: "Azure tenant"
